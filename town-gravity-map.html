@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Town Gravity Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6675;
+    --border: #d9dde4; --accent: #2563eb; --accent-text: #ffffff; --error: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #9aa3b2;
+      --border: #313846; --accent: #5b8def; --accent-text: #0b0e13; --error: #f97066;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; }
+  aside { width: 400px; max-width: 100%; overflow-y: auto; padding: 16px; background: var(--panel); border-right: 1px solid var(--border); }
+  #map { flex: 1; min-height: 50vh; }
+  @media (max-width: 800px) { body { flex-direction: column; height: auto; } aside { width: 100%; border-right: 0; border-bottom: 1px solid var(--border); } #map { min-height: 70vh; } }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 0 6px; }
+  p.hint { color: var(--muted); margin: 4px 0 8px; font-size: 12.5px; }
+  label { display: block; font-size: 12.5px; color: var(--muted); margin: 8px 0 3px; }
+  textarea, input, select { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px; }
+  textarea { min-height: 170px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .row { display: flex; gap: 8px; } .row > * { flex: 1; min-width: 0; }
+  button { font: inherit; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  #status { margin-top: 10px; font-size: 12.5px; color: var(--muted); white-space: pre-wrap; }
+  #status.error { color: var(--error); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+  td.num { font-variant-numeric: tabular-nums; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin: 3px 0; }
+  .swatch { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(0,0,0,.3); flex: none; }
+  .swatch.hl { box-shadow: 0 0 0 3px #facc15; }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Town gravity map</h1>
+  <p class="hint">Paste addresses as CSV. You need an <b>address</b> column (or <b>lat</b> and <b>lng</b> columns) and a <b>town</b> column. Any other column can colour or highlight the points. An optional numeric <b>weight</b> column gives a weighted centre of gravity.</p>
+
+  <h2>1. Data</h2>
+  <textarea id="csv" spellcheck="false">address,town,type,weight
+Dam 1,Amsterdam,shop,3
+Museumplein 6,Amsterdam,museum,1
+Leidseplein 26,Amsterdam,restaurant,2
+Neude 11,Utrecht,shop,1
+Domplein 21,Utrecht,museum,2
+Vredenburg 40,Utrecht,restaurant,1
+Grote Markt 1,Breda,restaurant,2
+Kasteelplein 55,Breda,museum,1</textarea>
+  <div class="actions">
+    <button id="loadFile">Load CSV file…</button>
+    <input type="file" id="file" accept=".csv,.tsv,.txt" hidden>
+  </div>
+  <label for="country">Country hint (added to every address when geocoding)</label>
+  <input id="country" value="Netherlands">
+
+  <h2>2. Columns</h2>
+  <div class="row">
+    <div><label for="colAddress">Address</label><select id="colAddress"></select></div>
+    <div><label for="colTown">Town</label><select id="colTown"></select></div>
+  </div>
+  <div class="row">
+    <div><label for="colWeight">Weight (optional)</label><select id="colWeight"></select></div>
+    <div><label for="colColor">Colour points by</label><select id="colColor"></select></div>
+  </div>
+  <label for="hlCol">Highlight points where…</label>
+  <div class="row">
+    <select id="hlCol"></select>
+    <select id="hlOp"><option value="eq">equals</option><option value="contains">contains</option><option value="gt">&gt;</option><option value="lt">&lt;</option></select>
+    <input id="hlVal" placeholder="value">
+  </div>
+
+  <h2>3. Map</h2>
+  <label for="gkey">Google Maps API key (optional; without one the page uses OpenStreetMap)</label>
+  <input id="gkey" type="password" placeholder="AIza…" autocomplete="off">
+  <div class="actions">
+    <button class="primary" id="run">Geocode &amp; plot</button>
+    <button id="exportCsv" disabled>Export centres CSV</button>
+    <button id="exportKml" disabled>Export KML (Google My Maps / Earth)</button>
+  </div>
+  <div id="status"></div>
+
+  <h2>Legend</h2>
+  <div id="legend"><p class="hint">Plot some data to see the legend.</p></div>
+
+  <h2>Centre of gravity per town</h2>
+  <div id="centres"><p class="hint">Nothing plotted yet.</p></div>
+</aside>
+<div id="map"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const PALETTE = ['#2563eb','#dc2626','#16a34a','#9333ea','#ea580c','#0891b2','#db2777','#65a30d','#a16207','#475569'];
+const NONE = '— none —';
+let rows = [], headers = [], lastResult = null;
+
+// Storage helpers: storage may be unavailable, so never let it break the page.
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+const geoCache = store.get('tgm-geocache') || {};
+$('gkey').value = store.get('tgm-gkey') || '';
+
+function setStatus(msg, isError = false) { $('status').textContent = msg; $('status').className = isError ? 'error' : ''; }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ---------- CSV + column pickers ----------
+function parseCsv() {
+  const res = Papa.parse($('csv').value.trim(), { header: true, skipEmptyLines: true, transformHeader: h => h.trim() });
+  rows = res.data; headers = res.meta.fields || [];
+  const guess = names => headers.find(h => names.includes(h.toLowerCase())) || NONE;
+  fillSelect('colAddress', guess(['address','adres','street','straat']));
+  fillSelect('colTown', guess(['town','city','plaats','stad','gemeente','woonplaats']));
+  fillSelect('colWeight', guess(['weight','gewicht','count','aantal']));
+  fillSelect('colColor', guess(['type','category','categorie','kind','soort']));
+  fillSelect('hlCol', $('hlCol').value && headers.includes($('hlCol').value) ? $('hlCol').value : NONE);
+}
+function fillSelect(id, selected) {
+  const el = $(id);
+  el.innerHTML = [NONE, ...headers].map(h => `<option${h === selected ? ' selected' : ''}>${esc(h)}</option>`).join('');
+}
+$('csv').addEventListener('change', parseCsv);
+$('loadFile').onclick = () => $('file').click();
+$('file').onchange = async e => { const f = e.target.files[0]; if (f) { $('csv').value = await f.text(); parseCsv(); } };
+parseCsv();
+
+// ---------- Map backends (Google Maps or Leaflet/OSM) ----------
+let map = null;
+function loadGoogle(key) {
+  if (window.google?.maps) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    window.__gmReady = resolve;
+    window.gm_authFailure = () => reject(new Error('Google rejected the API key (check that Maps JavaScript API and Geocoding API are enabled).'));
+    const s = document.createElement('script');
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&callback=__gmReady&v=weekly`;
+    s.onerror = () => reject(new Error('Could not load Google Maps.'));
+    document.head.appendChild(s);
+  });
+}
+
+function makeGoogleMap() {
+  const el = $('map'); el.innerHTML = '';
+  const gmap = new google.maps.Map(el, { center: { lat: 52.1, lng: 5.1 }, zoom: 7, mapTypeControl: false });
+  const info = new google.maps.InfoWindow();
+  let items = [];
+  const geocoder = new google.maps.Geocoder();
+  return {
+    kind: 'google',
+    clear() { items.forEach(i => i.setMap(null)); items = []; },
+    point(lat, lng, color, highlighted, html) {
+      const m = new google.maps.Marker({ map: gmap, position: { lat, lng }, zIndex: highlighted ? 2 : 1,
+        icon: { path: google.maps.SymbolPath.CIRCLE, scale: highlighted ? 10 : 7, fillColor: color, fillOpacity: .9,
+                strokeColor: highlighted ? '#facc15' : '#ffffff', strokeWeight: highlighted ? 4 : 1.5 } });
+      m.addListener('click', () => { info.setContent(html); info.open(gmap, m); });
+      items.push(m);
+    },
+    centre(lat, lng, html) {
+      const m = new google.maps.Marker({ map: gmap, position: { lat, lng }, zIndex: 10,
+        icon: { path: 'M 0,-14 4,-4 14,-4 6,2 9,12 0,6 -9,12 -6,2 -14,-4 -4,-4 z', scale: 1.3, fillColor: '#111827', fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 2 } });
+      m.addListener('click', () => { info.setContent(html); info.open(gmap, m); });
+      items.push(m);
+    },
+    line(a, b) { items.push(new google.maps.Polyline({ map: gmap, path: [a, b].map(([lat, lng]) => ({ lat, lng })), strokeColor: '#6b7280', strokeOpacity: .5, strokeWeight: 1 })); },
+    fit(pts) { const b = new google.maps.LatLngBounds(); pts.forEach(([lat, lng]) => b.extend({ lat, lng })); gmap.fitBounds(b, 40); },
+    async geocode(q) {
+      const { results } = await geocoder.geocode({ address: q });
+      if (!results.length) return null;
+      const loc = results[0].geometry.location; return [loc.lat(), loc.lng()];
+    },
+  };
+}
+
+function makeLeafletMap() {
+  const el = $('map'); el.innerHTML = '';
+  const lmap = L.map(el).setView([52.1, 5.1], 7);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(lmap);
+  const layer = L.layerGroup().addTo(lmap);
+  const starIcon = L.divIcon({ className: '', iconSize: [30, 30], iconAnchor: [15, 15],
+    html: '<svg width="30" height="30" viewBox="-15 -15 30 30"><path d="M0,-14 4,-4 14,-4 6,2 9,12 0,6 -9,12 -6,2 -14,-4 -4,-4z" fill="#111827" stroke="#fff" stroke-width="2"/></svg>' });
+  let lastCall = 0;
+  return {
+    kind: 'leaflet',
+    clear() { layer.clearLayers(); },
+    point(lat, lng, color, highlighted, html) {
+      L.circleMarker([lat, lng], { radius: highlighted ? 10 : 7, fillColor: color, fillOpacity: .9,
+        color: highlighted ? '#facc15' : '#ffffff', weight: highlighted ? 4 : 1.5 }).bindPopup(html).addTo(layer);
+    },
+    centre(lat, lng, html) { L.marker([lat, lng], { icon: starIcon, zIndexOffset: 1000 }).bindPopup(html).addTo(layer); },
+    line(a, b) { L.polyline([a, b], { color: '#6b7280', opacity: .5, weight: 1 }).addTo(layer); },
+    fit(pts) { lmap.fitBounds(pts, { padding: [40, 40] }); },
+    async geocode(q) {
+      // Nominatim usage policy: at most one request per second.
+      const wait = 1100 - (Date.now() - lastCall); if (wait > 0) await new Promise(r => setTimeout(r, wait));
+      lastCall = Date.now();
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+      if (!r.ok) throw new Error('Geocoder returned ' + r.status);
+      const j = await r.json(); return j.length ? [parseFloat(j[0].lat), parseFloat(j[0].lon)] : null;
+    },
+  };
+}
+
+async function ensureMap() {
+  const key = $('gkey').value.trim();
+  store.set('tgm-gkey', key);
+  const want = key ? 'google' : 'leaflet';
+  if (map?.kind === want) return map;
+  if (key) { await loadGoogle(key); map = makeGoogleMap(); } else { map = makeLeafletMap(); }
+  return map;
+}
+
+// ---------- Main ----------
+function matchesHighlight(row) {
+  const col = $('hlCol').value, op = $('hlOp').value, val = $('hlVal').value.trim();
+  if (col === NONE || val === '') return false;
+  const cell = String(row[col] ?? '').trim();
+  if (op === 'eq') return cell.toLowerCase() === val.toLowerCase();
+  if (op === 'contains') return cell.toLowerCase().includes(val.toLowerCase());
+  const a = parseFloat(cell), b = parseFloat(val);
+  if (isNaN(a) || isNaN(b)) return false;
+  return op === 'gt' ? a > b : a < b;
+}
+
+async function run() {
+  parseCsvKeepingSelections();
+  const colA = $('colAddress').value, colT = $('colTown').value, colW = $('colWeight').value, colC = $('colColor').value;
+  const latCol = headers.find(h => ['lat','latitude'].includes(h.toLowerCase()));
+  const lngCol = headers.find(h => ['lng','lon','long','longitude'].includes(h.toLowerCase()));
+  if (colT === NONE) return setStatus('Pick a town column.', true);
+  if (colA === NONE && !(latCol && lngCol)) return setStatus('Pick an address column, or include lat and lng columns.', true);
+  if (!rows.length) return setStatus('No rows found in the CSV.', true);
+
+  $('run').disabled = true;
+  try {
+    const m = await ensureMap();
+    m.clear();
+    const country = $('country').value.trim();
+    const points = [], failed = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      let ll = null;
+      if (latCol && lngCol && row[latCol] !== '' && row[lngCol] !== '') {
+        ll = [parseFloat(row[latCol]), parseFloat(row[lngCol])];
+        if (ll.some(isNaN)) ll = null;
+      }
+      if (!ll && colA !== NONE) {
+        const q = [row[colA], row[colT], country].filter(Boolean).join(', ');
+        const ck = m.kind + '|' + q;
+        setStatus(`Geocoding ${i + 1} of ${rows.length}: ${q}`);
+        if (geoCache[ck]) ll = geoCache[ck];
+        else {
+          try { ll = await m.geocode(q); } catch (e) { ll = null; }
+          if (ll) { geoCache[ck] = ll; store.set('tgm-geocache', geoCache); }
+        }
+      }
+      if (ll) points.push({ row, lat: ll[0], lng: ll[1] }); else failed.push(i + 2);
+    }
+    if (!points.length) throw new Error('None of the addresses could be geocoded.');
+
+    // Colour mapping
+    const colorOf = {};
+    if (colC !== NONE) [...new Set(points.map(p => String(p.row[colC] ?? '').trim()))].sort()
+      .forEach((v, i) => colorOf[v] = PALETTE[i % PALETTE.length]);
+
+    // Centre of gravity per town (weighted mean of coordinates; fine at town scale).
+    const towns = {};
+    for (const p of points) {
+      const t = String(p.row[colT] ?? '').trim() || '(no town)';
+      let w = colW !== NONE ? parseFloat(p.row[colW]) : 1;
+      if (isNaN(w) || w < 0) w = 1;
+      (towns[t] ||= { name: t, pts: [], sw: 0, slat: 0, slng: 0 });
+      const T = towns[t]; T.pts.push(p); T.sw += w; T.slat += p.lat * w; T.slng += p.lng * w;
+    }
+    const centres = Object.values(towns).map(T => {
+      const lat = T.sw ? T.slat / T.sw : T.pts[0].lat, lng = T.sw ? T.slng / T.sw : T.pts[0].lng;
+      const avgKm = T.pts.reduce((s, p) => s + haversineKm(lat, lng, p.lat, p.lng), 0) / T.pts.length;
+      return { town: T.name, lat, lng, n: T.pts.length, weight: T.sw, avgKm, pts: T.pts };
+    }).sort((a, b) => a.town.localeCompare(b.town));
+
+    // Draw
+    let hlCount = 0;
+    for (const c of centres) for (const p of c.pts) m.line([c.lat, c.lng], [p.lat, p.lng]);
+    for (const p of points) {
+      const hl = matchesHighlight(p.row); if (hl) hlCount++;
+      const color = colC !== NONE ? colorOf[String(p.row[colC] ?? '').trim()] : PALETTE[0];
+      const html = headers.map(h => `<b>${esc(h)}:</b> ${esc(p.row[h])}`).join('<br>');
+      m.point(p.lat, p.lng, color, hl, html);
+    }
+    for (const c of centres) m.centre(c.lat, c.lng,
+      `<b>Centre of gravity: ${esc(c.town)}</b><br>${c.n} point(s)${colW !== NONE ? `, total weight ${fmt(c.weight)}` : ''}<br>${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}<br>Mean distance to points: ${c.avgKm.toFixed(2)} km`);
+    m.fit([...points.map(p => [p.lat, p.lng]), ...centres.map(c => [c.lat, c.lng])]);
+
+    lastResult = { centres, points, colorOf, colC };
+    renderSidePanel(centres, colorOf, colC, hlCount);
+    $('exportCsv').disabled = $('exportKml').disabled = false;
+    setStatus(`Plotted ${points.length} of ${rows.length} rows in ${centres.length} town(s).` +
+      (hlCount ? ` ${hlCount} highlighted.` : '') +
+      (failed.length ? `\nCould not geocode CSV line(s): ${failed.join(', ')}` : ''), failed.length > 0);
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  } finally {
+    $('run').disabled = false;
+  }
+}
+
+function parseCsvKeepingSelections() {
+  const keep = ['colAddress','colTown','colWeight','colColor','hlCol'].map(id => [id, $(id).value]);
+  parseCsv();
+  for (const [id, v] of keep) if (v === NONE || headers.includes(v)) $(id).value = v;
+}
+
+function renderSidePanel(centres, colorOf, colC, hlCount) {
+  const entries = Object.entries(colorOf);
+  let legend = `<div class="legend-item"><svg width="14" height="14" viewBox="-15 -15 30 30"><path d="M0,-14 4,-4 14,-4 6,2 9,12 0,6 -9,12 -6,2 -14,-4 -4,-4z" fill="#111827"/></svg>Centre of gravity (per town)</div>`;
+  legend += entries.length
+    ? entries.map(([v, c]) => `<div class="legend-item"><span class="swatch" style="background:${c}"></span>${esc(colC)}: ${esc(v || '(blank)')}</div>`).join('')
+    : `<div class="legend-item"><span class="swatch" style="background:${PALETTE[0]}"></span>Address</div>`;
+  if (hlCount) legend += `<div class="legend-item"><span class="swatch hl" style="background:#fff"></span>Highlighted: ${esc($('hlCol').value)} ${esc($('hlOp').selectedOptions[0].text)} “${esc($('hlVal').value)}”</div>`;
+  $('legend').innerHTML = legend;
+  $('centres').innerHTML = `<table><thead><tr><th>Town</th><th>Points</th><th>Lat, Lng</th><th>Spread</th></tr></thead><tbody>` +
+    centres.map(c => `<tr><td>${esc(c.town)}</td><td class="num">${c.n}</td><td class="num">${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}</td><td class="num">${c.avgKm.toFixed(2)} km</td></tr>`).join('') +
+    `</tbody></table><p class="hint">Spread is the mean distance from the centre to that town's points.</p>`;
+}
+
+function haversineKm(a1, o1, a2, o2) {
+  const r = Math.PI / 180, dA = (a2 - a1) * r, dO = (o2 - o1) * r;
+  const h = Math.sin(dA / 2) ** 2 + Math.cos(a1 * r) * Math.cos(a2 * r) * Math.sin(dO / 2) ** 2;
+  return 12742 * Math.asin(Math.sqrt(h));
+}
+function fmt(n) { return Number.isInteger(n) ? n : n.toFixed(2); }
+
+// ---------- Exports ----------
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+$('exportCsv').onclick = () => {
+  const { centres } = lastResult;
+  download('town-centres.csv', Papa.unparse(centres.map(c => ({ town: c.town, lat: c.lat.toFixed(6), lng: c.lng.toFixed(6), points: c.n, total_weight: c.weight, mean_distance_km: c.avgKm.toFixed(3) }))), 'text/csv');
+};
+$('exportKml').onclick = () => {
+  const { centres, points, colorOf, colC } = lastResult;
+  const kmlColor = hex => 'ff' + hex.slice(5, 7) + hex.slice(3, 5) + hex.slice(1, 3); // KML is aabbggrr
+  const styles = Object.entries(colorOf).map(([v, c], i) => `<Style id="c${i}"><IconStyle><color>${kmlColor(c)}</color><Icon><href>http://maps.google.com/mapfiles/kml/paddle/wht-blank.png</href></Icon></IconStyle></Style>`).join('');
+  const styleIdx = Object.fromEntries(Object.keys(colorOf).map((v, i) => [v, i]));
+  const pm = (name, desc, lat, lng, style) => `<Placemark><name>${esc(name)}</name><description>${esc(desc)}</description>${style ? `<styleUrl>#${style}</styleUrl>` : ''}<Point><coordinates>${lng},${lat},0</coordinates></Point></Placemark>`;
+  const centreKml = centres.map(c => pm(`Centre: ${c.town}`, `${c.n} points, mean distance ${c.avgKm.toFixed(2)} km`, c.lat, c.lng, 'centre')).join('');
+  const addrCol = $('colAddress').value;
+  const pointKml = points.map(p => {
+    const v = colC !== NONE ? String(p.row[colC] ?? '').trim() : null;
+    const name = addrCol !== NONE ? p.row[addrCol] : `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`;
+    return pm(name, headers.map(h => `${h}: ${p.row[h]}`).join('\n'), p.lat, p.lng, v !== null ? 'c' + styleIdx[v] : null);
+  }).join('');
+  download('town-gravity.kml', `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Town gravity map</name>
+<Style id="centre"><IconStyle><scale>1.4</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/ylw-stars.png</href></Icon></IconStyle></Style>${styles}
+<Folder><name>Centres of gravity</name>${centreKml}</Folder><Folder><name>Addresses</name>${pointKml}</Folder></Document></kml>`, 'application/vnd.google-earth.kml+xml');
+};
+
+$('run').onclick = run;
+</script>
+</body>
+</html>
